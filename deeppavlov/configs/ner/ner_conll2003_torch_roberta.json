@@ -108,7 +108,7 @@
   },
   "train": {
     "epochs": 30,
-    "batch_size": 16,
+    "batch_size": 8,
     "metrics": [
       {
         "name": "ner_f1",
@@ -142,14 +142,8 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "MODELS_PATH": "{ROOT_PATH}/models",
-      "TRANSFORMER": "bert-base-cased",
-      "MODEL_PATH": "{MODELS_PATH}/ner_conll2003_torch_bert/{TRANSFORMER}"
-    },
-    "download": [
-      {
-        "url": "http://files.deeppavlov.ai/0.16/ner/ner_conll2003_torch_bert.tar.gz",
-        "subdir": "{ROOT_PATH}/models"
-      }
-    ]
+      "TRANSFORMER": "roberta-large",
+      "MODEL_PATH": "{MODELS_PATH}/ner_conll2003_torch/{TRANSFORMER}"
+    }
   }
 }
