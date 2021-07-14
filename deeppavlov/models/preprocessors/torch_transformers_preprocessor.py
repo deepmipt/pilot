@@ -17,9 +17,9 @@ import random
 from logging import getLogger
 from pathlib import Path
 import torch
-from typing import Tuple, List, Optional, Union
+from typing import Tuple, List, Optional, Union, Dict, Any
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, BertTokenizer
 from transformers.data.processors.utils import InputFeatures
 
 from deeppavlov.core.commands.utils import expand_path
@@ -66,7 +66,7 @@ class TorchTransformersPreprocessor(Component):
             self.tokenizer = AutoTokenizer.from_pretrained(vocab_file, do_lower_case=do_lower_case)
 
     def __call__(self, texts_a: List[str], texts_b: Optional[List[str]] = None) -> Union[
-            List[InputFeatures], Tuple[List[InputFeatures], List[List[str]]]]:
+        List[InputFeatures], Tuple[List[InputFeatures], List[List[str]]]]:
         """Tokenize and create masks.
 
         texts_a and texts_b are separated by [SEP] token
@@ -109,7 +109,8 @@ class TorchTransformersPreprocessor(Component):
 
 @register('torch_transformers_ner_preprocessor')
 class TorchTransformersNerPreprocessor(Component):
-    """Takes tokens and splits them into bert subtokens, encodes subtokens with their indices.
+    """
+    Takes tokens and splits them into bert subtokens, encodes subtokens with their indices.
     Creates a mask of subtokens (one for the first subtoken, zero for the others).
 
     If tags are provided, calculates tags for subtokens.
@@ -158,8 +159,19 @@ class TorchTransformersNerPreprocessor(Component):
                  tokens: Union[List[List[str]], List[str]],
                  tags: List[List[str]] = None,
                  **kwargs):
+        tokens_offsets_batch = [[] for _ in tokens]
         if isinstance(tokens[0], str):
-            tokens = [re.findall(self._re_tokenizer, s) for s in tokens]
+            tokens_batch = []
+            tokens_offsets_batch = []
+            for s in tokens:
+                tokens_list = []
+                tokens_offsets_list = []
+                for elem in re.finditer(self._re_tokenizer, s):
+                    tokens_list.append(elem[0])
+                    tokens_offsets_list.append((elem.start(), elem.end()))
+                tokens_batch.append(tokens_list)
+                tokens_offsets_batch.append(tokens_offsets_list)
+            tokens = tokens_batch
         subword_tokens, subword_tok_ids, startofword_markers, subword_tags = [], [], [], []
         for i in range(len(tokens)):
             toks = tokens[i]
@@ -194,7 +206,7 @@ class TorchTransformersNerPreprocessor(Component):
         if tags is not None:
             if self.provide_subword_tags:
                 return tokens, subword_tokens, subword_tok_ids, \
-                    attention_mask, startofword_markers, subword_tags
+                       attention_mask, startofword_markers, subword_tags
             else:
                 nonmasked_tags = [[t for t in ts if t != 'X'] for ts in tags]
                 for swts, swids, swms, ts in zip(subword_tokens,
@@ -208,8 +220,8 @@ class TorchTransformersNerPreprocessor(Component):
                         log.warning(f'Masks: {swms}')
                         log.warning(f'Tags len: {len(ts)}\n Tags: {ts}')
                 return tokens, subword_tokens, subword_tok_ids, \
-                    attention_mask, startofword_markers, nonmasked_tags
-        return tokens, subword_tokens, subword_tok_ids, startofword_markers, attention_mask
+                       attention_mask, startofword_markers, nonmasked_tags
+        return tokens, subword_tokens, subword_tok_ids, startofword_markers, attention_mask, tokens_offsets_batch
 
     @staticmethod
     def _ner_bert_tokenize(tokens: List[str],
@@ -259,7 +271,7 @@ class TorchBertRankerPreprocessor(TorchTransformersPreprocessor):
         """Tokenize and create masks.
 
         Args:
-            batch: list of elemenents where the first element represents the batch with contexts
+            batch: list of elements where the first element represents the batch with contexts
                 and the rest of elements represent response candidates batches
 
         Returns:
@@ -299,3 +311,193 @@ class TorchBertRankerPreprocessor(TorchTransformersPreprocessor):
             input_features.append(sub_list_features)
 
         return input_features
+
+
+@register('torch_transformers_re_preprocessor')
+class TorchTransformersREPreprocessor(Component):
+    def __init__(
+            self,
+            vocab_file: str,
+            special_token: str = '<ENT>',
+            ner_tags=None,
+            max_seq_length: int = 512,
+            do_lower_case: bool = False,
+            **kwargs
+    ):
+        """
+        Args:
+            vocab_file: path to vocabulary / name of vocabulary for tokenizer initialization
+            special_token: an additional token that will be used for marking the entities in the document
+            do_lower_case: set True if lowercasing is needed
+        Return:
+            list of feature batches with input_ids, attention_mask, entity_pos, ner_tags
+        """
+
+        self.special_token = special_token
+        self.special_tokens_dict = {'additional_special_tokens': [self.special_token]}
+
+        if ner_tags is None:
+            ner_tags = ['ORG', 'TIME', 'MISC', 'LOC', 'PER', 'NUM']
+        self.ner2id = {tag: tag_id for tag_id, tag in enumerate(ner_tags)}
+        self.max_seq_length = max_seq_length
+
+        out = open("log.txt", 'a')
+        out.write(f"Number of tags: {len(self.ner2id)}" + '\n')
+        out.write(f"Tags are: {self.ner2id}" + '\n')
+        out.close()
+
+        if Path(vocab_file).is_file():
+            vocab_file = str(expand_path(vocab_file))
+            self.tokenizer = BertTokenizer(vocab_file=vocab_file, do_lower_case=do_lower_case)
+        else:
+            self.tokenizer = BertTokenizer.from_pretrained(vocab_file, do_lower_case=do_lower_case)
+
+    def __call__(self, input_info: List[Tuple[List, List]]) -> List[Dict]:
+
+        tokens, entity_info = zip(*input_info)
+
+        """
+        Tokenize and create masks; recalculate the entity positions reagrding the document boarders.
+        Args:
+            tokens: List of tokens of each document: List[List[tokens in doc]]
+            entity_info: List of information about entities containing in the document:
+                List[
+                    List[
+                        (entity1_mention1_start_id, entity1_mention1_end_id),
+                        (entity1_mention2_start_id, entity1_mention2_end_id),
+                        ],
+                    List[
+                        (entity2_mention1_start_id, entity2_mention1_end_id),
+                        ],
+                    NER tag of entity1,
+                    NER tag of entity2
+                    ]
+        Return:
+            input_features: List[
+                input_ids: List[int],
+                attention_mask: List[int],
+                entity_pos: List[
+                                List[
+                                        tuple(entity1_mention1_start_id, entity1_mention1_end_id),
+                                        tuple(entity1_mention2_start_id, entity1_mention2_end_id)
+                                    ],
+                                List[
+                                        tuple(entity2_mention1_start_id, entity2_mention1_end_id)
+                                    ]
+                                ]
+                ner_tags: List[ner_tag_entity1, ner_tag_entity2]
+                ]
+        """
+
+        _ = self.tokenizer.add_special_tokens(self.special_tokens_dict)
+        input_features = []
+        doc_wordpiece_tokens_batch = []
+        entity_pos_batch = []
+        ner_tags_batch = []
+        for doc, entities in zip(tokens, entity_info):
+            count = 0
+            doc_wordpiece_tokens = []
+            entity1_pos_start = list(zip(*entities[0]))[0]  # first entity mentions' start positions
+            entity1_pos_end = list(zip(*entities[0]))[1]  # first entity mentions' end positions
+            entity2_pos_start = list(zip(*entities[1]))[0]  # second entity mentions' start positions
+            entity2_pos_end = list(zip(*entities[1]))[1]  # second entity mentions' end positions
+            upd_entity1_pos_start, upd_entity2_pos_start, upd_entity1_pos_end, upd_entity2_pos_end = [], [], [], []
+            for n, token in enumerate(doc):
+                if n in entity1_pos_start:
+                    doc_wordpiece_tokens.append(self.special_token)
+                    upd_entity1_pos_start.append(count)
+                    count += 1
+                if n in entity1_pos_end:
+                    doc_wordpiece_tokens.append(self.special_token)
+                    count += 1
+                    upd_entity1_pos_end.append(count)
+
+                if n in entity2_pos_start:
+                    doc_wordpiece_tokens.append(self.special_token)
+                    upd_entity2_pos_start.append(count)
+                    count += 1
+                if n in entity2_pos_end:
+                    doc_wordpiece_tokens.append(self.special_token)
+                    count += 1
+                    upd_entity2_pos_end.append(count)
+
+                word_tokens = self.tokenizer.tokenize(token)
+                doc_wordpiece_tokens += word_tokens
+                count += len(word_tokens)
+
+            # special case when the entity is the last in the doc
+            if len(doc) in entity1_pos_end:
+                doc_wordpiece_tokens.append(self.special_token)
+                count += 1
+                upd_entity1_pos_end.append(count)
+            if len(doc) in entity2_pos_end:
+                doc_wordpiece_tokens.append(self.special_token)
+                count += 1
+                upd_entity2_pos_end.append(count)
+                word_tokens = self.tokenizer.tokenize(token)
+                doc_wordpiece_tokens += word_tokens
+                count += len(word_tokens)
+
+            upd_entity1 = list(zip(upd_entity1_pos_start, upd_entity1_pos_end))
+            upd_entity2 = list(zip(upd_entity2_pos_start, upd_entity2_pos_end))
+
+            # text entities for self check
+            upd_entity1_text = [doc_wordpiece_tokens[ent_m[0]:ent_m[1]] for ent_m in upd_entity1]
+            upd_entity2_text = [doc_wordpiece_tokens[ent_m[0]:ent_m[1]] for ent_m in upd_entity2]
+
+            enc_ner_tag = self.encode_ner_tag(entities[2], entities[3])
+
+            doc_wordpiece_tokens_batch.append(doc_wordpiece_tokens[:self.max_seq_length])   # add truncated tokens
+            entity_pos_batch.append([upd_entity1, upd_entity2])
+            ner_tags_batch.append(enc_ner_tag)
+
+        for (upd_entity1, upd_entity2), enc_ner_tag, doc_wordpiece_tokens in \
+                zip(entity_pos_batch, ner_tags_batch, doc_wordpiece_tokens_batch):
+            encoding = self.tokenizer.encode_plus(
+                doc_wordpiece_tokens,
+                add_special_tokens=True,
+                truncation=True,
+                max_length=self.max_seq_length,
+                pad_to_max_length=True,
+                return_attention_mask=True,  # return_tensors="pt"
+            )
+
+            input_features.append(
+                {
+                    "input_ids": encoding['input_ids'],
+                    "attention_mask": encoding['attention_mask'],
+                    "entity_pos": [upd_entity1, upd_entity2],
+                    "ner_tags": enc_ner_tag
+                }
+            )
+
+        # todo: wil be deleted
+        # from joblib import dump
+        # dump(input_features[:50],
+        #      "/Users/asedova/Documents/04_deeppavlov/deeppavlov_fork/DocRED/out_transformer_preprocessor/dev_small")
+
+        return input_features
+
+    def encode_ner_tag(self, *ner_tags) -> List:
+        """ Encode NER tags with one hot encodings """
+        enc_ner_tags = []
+        for ner_tag in ner_tags:
+            ner_tag_one_hot = [0] * len(self.ner2id)
+            ner_tag_one_hot[self.ner2id[ner_tag]] = 1
+            enc_ner_tags.append(ner_tag_one_hot)
+        return enc_ner_tags
+
+
+# todo: wil be deleted
+if __name__ == "__main__":
+    from joblib import load
+    from deeppavlov.dataset_iterators.basic_classification_iterator import BasicClassificationDatasetIterator
+
+    data = load(
+        "/Users/asedova/PycharmProjects/05_deeppavlov_fork/docred/out_dataset_reader_without_neg/all_data"
+    )
+    data_iter_out = BasicClassificationDatasetIterator(data)
+    entity_info = [data[0] for data in data_iter_out.test]
+    labels = [data[1] for data in data_iter_out.test]
+
+    TorchTransformersREPreprocessor("bert-base-cased").__call__(entity_info)

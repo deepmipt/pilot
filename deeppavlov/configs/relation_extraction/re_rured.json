@@ -1,0 +1,78 @@
+{
+  "dataset_reader": {
+    "class_name": "rured_reader",
+    "data_path": "{DOWNLOADS_PATH}/rured/"
+  },
+  "dataset_iterator": {
+    "class_name": "basic_classification_iterator"
+  },
+  "chainer": {
+    "in": ["input_x"],
+    "in_y": ["y_ids"],
+    "pipe": [
+      {
+        "in": ["input_x"],
+        "out": ["input_x_bert"],
+        "class_name": "torch_transformers_re_preprocessor",
+        "ner_tags": ["WORK_OF_ART", "NORP", "GROUP", "LAW", "NATIONALITY", "EVENT", "DATE", "CURRENCY", "GPE",
+                     "QUANTITY", "FAMILY", "ORDINAL", "RELIGION", "CITY", "MONEY", "AGE", "LOCATION", "PERCENT",
+                     "BOROUGH", "STREET", "PERSON", "REGION", "COUNTRY", "PROFESSION", "ORGANIZATION", "FAC",
+                     "CARDINAL", "PRODUCT", "TIME"],
+        "max_seq_length": 512,
+        "vocab_file": "{TRANSFORMER}"
+      },
+      {
+        "class_name": "re_torch_transformers_classifier",
+        "in": ["input_x_bert"],
+        "in_y": ["y_ids"],
+        "out": ["model_output"],
+        "save_path": "{MODEL_PATH}/model",
+        "load_path": "{MODEL_PATH}/model",
+        "model_name": "re_model",
+        "n_classes": 30,
+        "ner_tags_length": 29,
+        "pretrained_bert": "{TRANSFORMER}"
+      },
+      {
+        "class_name": "re_postprocessor",
+        "rel2id_path": "{DOWNLOADS_PATH}/rured/rel2id.json",
+        "rel2label_path": "{DOWNLOADS_PATH}/rured/rel2label.json",
+        "return_rel_labels": true,
+        "in": ["model_output"],
+        "out": ["predictions"]
+      }
+    ],
+    "out": ["predictions"]
+  },
+  "train": {
+    "epochs": 50,
+    "batch_size": 16,
+    "train_metrics": ["f1_weighted", "acc"],
+    "metrics": ["f1_weighted", "acc"],
+    "validation_patience": 50,
+    "val_every_n_batches": 100,
+    "log_every_n_batches": 100,
+    "evaluation_targets": ["valid", "train"],
+    "show_examples": false,
+    "class_name": "torch_trainer"
+  },
+  "metadata": {
+    "variables": {
+      "ROOT_PATH": "~/.deeppavlov",
+      "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
+      "MODELS_PATH": "{ROOT_PATH}/models",
+      "TRANSFORMER": "DeepPavlov/rubert-base-cased",
+      "MODEL_PATH": "{MODELS_PATH}/re_rured"
+      },
+    "download": [
+      {
+        "url": "http://files.deeppavlov.ai/deeppavlov_data/relation_extraction/rured.tar.gz",
+        "subdir": "{DOWNLOADS_PATH}/rured"
+      },
+      {
+        "url": "http://files.deeppavlov.ai/deeppavlov_data/relation_extraction/re_rured_model.tar.gz",
+        "subdir": "{MODELS_PATH}/re_rured"
+      }
+    ]
+  }
+}
